@@ -9,6 +9,7 @@ import {
   Transferit,
   MegaAPI,
   MegaAPIError,
+  streamDecrypt,
   type UploadResult,
   type DownloadResult,
   type TransferInfo,
@@ -22,7 +23,20 @@ import {
 npm install @noxius/transferit
 ```
 
-Requires Node.js 20+ (for the Node filesystem path APIs). Browsers need a secure context (HTTPS or `localhost`) for uploads (WebSocket) and downloads (Service Worker).
+| Runtime | Requirements |
+|---------|----------------|
+| **Node** | 20+ (filesystem upload/download) |
+| **Browser** | Secure context (`HTTPS` or `localhost`) for WebSocket uploads |
+
+A **service worker is not required**. It is only used if you opt into `downloadBrowser()` / React `useTransfer` so decrypted files stream into the browser download shelf. Uploads, listing, metadata, Node downloads, and in-page decrypt via `streamDecrypt` work without one.
+
+### Package entry points
+
+| Import | What you get |
+|--------|----------------|
+| `@noxius/transferit` | Core client + helpers |
+| `@noxius/transferit/react` | Headless React hooks (`react` peer, optional) |
+| `@noxius/transferit/sw` | Bundled service worker script (`dist/sw-download.js`) |
 
 ---
 
@@ -30,7 +44,7 @@ Requires Node.js 20+ (for the Node filesystem path APIs). Browsers need a secure
 
 ### Upload
 
-Same `upload()` API — pass a `File`, `Blob`, `FileList` (e.g. `<input webkitdirectory>`), or `{ path, blob }[]` instead of a filesystem path:
+Same `upload()` API — pass a `File`, `Blob`, `FileList` (e.g. `<input webkitdirectory>`), or `{ path, blob }[]` instead of a filesystem path. No service worker.
 
 ```ts
 const tx = new Transferit();
@@ -38,9 +52,42 @@ await tx.upload(fileInput.files![0]!);
 await tx.upload(fileInput.files!); // folder picker → preserves relative paths
 ```
 
-### Download (Service Worker)
+### Download without a service worker
 
-MEGA’s CDN only serves ciphertext. In the browser, register the bundled service worker, then use `downloadBrowser()` so files land in the normal download shelf (streamed decrypt, not held in a Blob):
+MEGA’s CDN only serves ciphertext. Decrypt in the page with `streamDecrypt`, then save however you like (Blob URL, `showSaveFilePicker`, etc.).
+
+**Tradeoff:** building a `Blob` holds the whole plaintext in memory. Prefer the [service worker path](#download-with-service-worker-optional) for large files.
+
+```ts
+import { MegaAPI, Transferit, streamDecrypt } from "@noxius/transferit";
+
+const tx = new Transferit();
+const url = "https://transfer.it/t/xxxxxxxxxxxx";
+const xh = MegaAPI.parseXh(url);
+const password = null; // or "hunter2"
+
+const nodes = await tx.info(url, { password });
+const file = nodes.find((n) => n.isFile)!;
+
+const { g, s } = await tx.api.getDownloadUrl(xh, file.handle, {
+  pwToken: password ? await MegaAPI.derivePassword(xh, password) : null,
+});
+const size = Number(s) || file.size || 0;
+
+const plain = await streamDecrypt(String(g), file.key, size);
+const blob = await new Response(plain).blob();
+
+const a = document.createElement("a");
+a.href = URL.createObjectURL(blob);
+a.download = file.name || file.handle;
+a.click();
+URL.revokeObjectURL(a.href);
+
+tx.close();
+```
+### Download with service worker (optional)
+
+Register the bundled worker, then use `downloadBrowser()` so files land in the normal download shelf (streamed decrypt — not held as a full `Blob`):
 
 ```bash
 # copy the worker to your site root (or configure serviceWorkerUrl)
@@ -49,20 +96,34 @@ cp node_modules/@noxius/transferit/dist/sw-download.js ./public/sw-download.js
 
 ```ts
 import { Transferit } from "@noxius/transferit";
-// or: import "@noxius/transferit/sw"  → resolve to dist/sw-download.js
+// script URL resolves via: import "@noxius/transferit/sw"
 
 const tx = new Transferit();
 await tx.downloadBrowser("https://transfer.it/t/xxxxxxxxxxxx", {
   serviceWorkerUrl: "/sw-download.js",
   scope: "/",
+  // password: "hunter2",
 });
 ```
+
+| Option | Type | Notes |
+|--------|------|-------|
+| `password` | `string` | For protected transfers |
+| `serviceWorkerUrl` | `string` | Default `/sw-download.js` |
+| `scope` | `string` | SW registration scope (default `/`) |
+| `onFileStart` / `onFileDone` | `(node) => void` | Per-file hooks |
+
+Returns `{ xh, started, nodes }` — `started` is how many downloads were queued; the browser download shelf finishes them.
+
+Lower-level helpers (also exported): `ensureServiceWorker`, `downloadViaServiceWorker`, `downloadNodeViaServiceWorker`, `triggerServiceWorkerDownload`.
 
 Demo: `examples/browser-download.html` (`npx --yes serve examples`).
 
 ### React (`@noxius/transferit/react`)
 
 Headless hooks — bring your own UI. `react` is an optional peer (`>=18`).
+
+`useTransfer` downloads through the service worker (same optional path as `downloadBrowser`). Upload and listing do not need a worker.
 
 ```tsx
 import {
@@ -99,8 +160,10 @@ function Downloader({ url }: { url: string }) {
 | Export | Role |
 |--------|------|
 | `TransferitProvider` / `useTransferit` | Shared client |
-| `useUpload` | Upload + progress state |
-| `useTransfer` | List + SW download (`begin` / `download` / `refresh`) |
+| `useUpload` | Upload + progress state (no SW) |
+| `useTransfer` | List + optional SW download (`begin` / `download` / `refresh`) |
+
+`useTransfer(url, { password?, serviceWorkerUrl?, scope? })`.
 
 ---
 
@@ -273,11 +336,11 @@ console.log(JSON.stringify(result.toJSON(), null, 2));
 
 ---
 
-## `download`
+## `download` (Node)
 
-**Node:** mirror a transfer into a local directory. Recreates folder hierarchy. No session required.
+Mirror a transfer into a local directory. Recreates folder hierarchy. No session and no service worker required.
 
-**Browser:** use [`downloadBrowser`](#browser) (service worker) instead — there is no filesystem `outputDir`.
+In the browser there is no filesystem `outputDir` — use [`streamDecrypt`](#download-without-a-service-worker) or optional [`downloadBrowser`](#download-with-service-worker-optional).
 
 ```ts
 async function download(
@@ -593,12 +656,21 @@ const tx = new Transferit({ api });
 | `api.createEphemeralSession()` | Anonymous `up` + `us` |
 | `api.createTransfer(name)` | `xn` → `{ xh, rootH, folderKey }` |
 | `api.closeTransfer(xh)` | `xc` |
-| `api.fetchTransfer(xh, { password? })` | `f` listing |
+| `api.deleteTransfer(xh)` | Delete transfer |
+| `api.fetchTransfer(xh, { password? })` | `f` listing (+ `pwToken` when unlocked) |
 | `api.fetchTransferInfo(xh)` | `xi` metadata |
 | `api.getDownloadUrl(xh, nodeHandle, { pwToken? })` | `g` |
 | `api.uploadPools()` | `usc` WebSocket pool directory |
+| `api.validatePassword(xh, pwToken)` | Check password token |
+| `api.setTransferAttributes(…)` / `setTransferRecipient(…)` | Transfer extras |
 
-Protocol internals: [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
+### Streaming decrypt helpers
+
+| Export | Purpose |
+|--------|---------|
+| `streamDecrypt(cdnUrl, keyA32, size)` | Fetch CDN ciphertext → decrypted `ReadableStream` (browser + Node) |
+| `createDecryptTransform(keyA32, size)` | Web `TransformStream` for AES-CTR plaintext |
+| `computeFolderPaths(nodes, rootHandle)` | Relative paths for nested folder downloads |
 
 ---
 
