@@ -1,6 +1,6 @@
 {
   "name": "@noxius/transferit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript/Node client for transfer.it — upload and download via the MEGA backend",
   "type": "module",
   "main": "./dist/index.cjs",
