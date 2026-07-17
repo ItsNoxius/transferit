@@ -1,10 +1,9 @@
 /**
  * High-level upload orchestration.
  * Port of transferit-py `_actions/_upload.py`.
+ * Accepts filesystem paths (Node) or File/Blob/entries (browser).
  */
 
-import path from "node:path";
-import { stat } from "node:fs/promises";
 import { MegaAPI, SHARE_BASE } from "./api.js";
 import { randA32 } from "./crypto.js";
 import { MegaAPIError } from "./errors.js";
@@ -12,9 +11,10 @@ import { makeUploadResult, type UploadResult } from "./models.js";
 import { castExpirySeconds, parseDuration } from "./transfer.js";
 import {
   DEFAULT_CONCURRENCY,
+  blobSource,
   buildRemoteTree,
-  walkFolder,
   wsUploadOne,
+  type ByteSource,
 } from "./upload.js";
 
 export interface UploadOptions {
@@ -42,9 +42,192 @@ export interface UploadOptions {
   onFileDone?: (fileno: number, filePath: string, size: number) => void;
 }
 
+/** One file in a browser folder upload (`webkitRelativePath` or explicit path). */
+export interface UploadEntry {
+  /** Posix-ish path relative to the transfer root, e.g. `src/main.ts`. */
+  path: string;
+  blob: Blob;
+}
+
+export type UploadSource =
+  | string
+  | Blob
+  | File
+  | UploadEntry[]
+  | FileList;
+
+interface PreparedFile {
+  label: string;
+  relParent: string;
+  basename: string;
+  size: number;
+  open: () => Promise<ByteSource>;
+}
+
+function basenamePosix(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i === -1 ? p : p.slice(i + 1);
+}
+
+function dirnamePosix(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i === -1 ? "" : p.slice(0, i);
+}
+
+function normalizeRel(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+async function prepareSource(
+  source: UploadSource,
+  opts: UploadOptions,
+): Promise<{
+  title: string;
+  files: PreparedFile[];
+  dirRelPaths: string[];
+}> {
+  if (typeof source === "string") {
+    const { pathSource, walkFolder } = await import("./upload-fs.js");
+    const path = await import("node:path");
+    const { stat } = await import("node:fs/promises");
+
+    const p = path.resolve(source);
+    const st = await stat(p).catch(() => null);
+    if (!st) throw new Error(`not a file or directory: ${p}`);
+
+    if (st.isDirectory()) {
+      const walked = await walkFolder(p, {
+        exclude: opts.exclude ?? undefined,
+      });
+      if (!walked.files.length) {
+        throw new Error(`${p} contains no files to upload`);
+      }
+      const files: PreparedFile[] = [];
+      for (const f of walked.files) {
+        const size = (await stat(f)).size;
+        const relParent = path
+          .relative(p, path.dirname(f))
+          .split(path.sep)
+          .join("/");
+        files.push({
+          label: f,
+          relParent: relParent === "" || relParent === "." ? "" : relParent,
+          basename: path.basename(f),
+          size,
+          open: () => pathSource(f),
+        });
+      }
+      return {
+        title: opts.title ?? path.basename(p),
+        files,
+        dirRelPaths: walked.dirRelPaths,
+      };
+    }
+
+    if (st.isFile()) {
+      return {
+        title: opts.title ?? path.basename(p),
+        files: [
+          {
+            label: p,
+            relParent: "",
+            basename: path.basename(p),
+            size: st.size,
+            open: () => pathSource(p),
+          },
+        ],
+        dirRelPaths: [],
+      };
+    }
+    throw new Error(`not a file or directory: ${p}`);
+  }
+
+  if (typeof FileList !== "undefined" && source instanceof FileList) {
+    const entries: UploadEntry[] = [];
+    for (let i = 0; i < source.length; i++) {
+      const f = source.item(i)!;
+      const rel =
+        (f as File & { webkitRelativePath?: string }).webkitRelativePath ||
+        f.name;
+      entries.push({ path: normalizeRel(rel), blob: f });
+    }
+    return prepareEntries(entries, opts);
+  }
+
+  if (Array.isArray(source)) {
+    return prepareEntries(source, opts);
+  }
+
+  // Blob / File
+  const blob = source as Blob;
+  const name =
+    blob instanceof File
+      ? blob.name
+      : opts.title?.trim() || "upload.bin";
+  return {
+    title: opts.title ?? name,
+    files: [
+      {
+        label: name,
+        relParent: "",
+        basename: basenamePosix(name),
+        size: blob.size,
+        open: async () => blobSource(blob, name),
+      },
+    ],
+    dirRelPaths: [],
+  };
+}
+
+function prepareEntries(
+  entries: UploadEntry[],
+  opts: UploadOptions,
+): {
+  title: string;
+  files: PreparedFile[];
+  dirRelPaths: string[];
+} {
+  if (!entries.length) throw new Error("no files to upload");
+
+  const dirSet = new Set<string>();
+  const files: PreparedFile[] = [];
+
+  for (const e of entries) {
+    const rel = normalizeRel(e.path);
+    if (!rel || rel.endsWith("/")) continue;
+    const parent = dirnamePosix(rel);
+    if (parent) {
+      const parts = parent.split("/");
+      for (let i = 1; i <= parts.length; i++) {
+        dirSet.add(parts.slice(0, i).join("/"));
+      }
+    }
+    const name = basenamePosix(rel);
+    files.push({
+      label: rel,
+      relParent: parent,
+      basename: name,
+      size: e.blob.size,
+      open: async () => blobSource(e.blob, name),
+    });
+  }
+
+  if (!files.length) throw new Error("no files to upload");
+
+  const dirRelPaths = [...dirSet].sort(
+    (a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b),
+  );
+
+  return {
+    title: opts.title ?? basenamePosix(normalizeRel(entries[0]!.path)),
+    files,
+    dirRelPaths,
+  };
+}
+
 export async function doUpload(
   api: MegaAPI,
-  filePath: string,
+  source: UploadSource,
   opts: UploadOptions & { filenoProvider: () => number },
 ): Promise<UploadResult> {
   let expirySeconds: number | null | undefined =
@@ -53,35 +236,10 @@ export async function doUpload(
       : opts.expiry;
   expirySeconds = castExpirySeconds(expirySeconds ?? null);
 
-  const p = path.resolve(filePath);
-  const st = await stat(p).catch(() => null);
-  if (!st) throw new Error(`not a file or directory: ${p}`);
+  const prepared = await prepareSource(source, opts);
+  const { title, dirRelPaths } = prepared;
+  const files = [...prepared.files].sort((a, b) => a.size - b.size);
 
-  let rawFiles: string[];
-  let dirRelPaths: string[];
-  let localRoot: string;
-  const isDir = st.isDirectory();
-
-  if (isDir) {
-    const walked = await walkFolder(p, {
-      exclude: opts.exclude ?? undefined,
-    });
-    rawFiles = walked.files;
-    dirRelPaths = walked.dirRelPaths;
-    localRoot = p;
-  } else if (st.isFile()) {
-    rawFiles = [p];
-    dirRelPaths = [];
-    localRoot = path.dirname(p);
-  } else {
-    throw new Error(`not a file or directory: ${p}`);
-  }
-
-  if (!rawFiles.length) {
-    throw new Error(`${p} contains no files to upload`);
-  }
-
-  const title = opts.title ?? path.basename(p);
   const message = opts.message ?? null;
   const password = opts.password ?? null;
   const sender = opts.sender ?? null;
@@ -107,14 +265,7 @@ export async function doUpload(
     throw new MegaAPIError("recipients require sender email");
   }
 
-  const sized = await Promise.all(
-    rawFiles.map(async (f) => ({ f, size: (await stat(f)).size })),
-  );
-  sized.sort((a, b) => a.size - b.size);
-  const files = sized.map((x) => x.f);
-  const sizes = sized.map((x) => x.size);
-  const totalBytes = sizes.reduce((a, b) => a + b, 0);
-
+  const totalBytes = files.reduce((a, f) => a + f.size, 0);
   opts.onStart?.(totalBytes, files.length);
 
   await api.createEphemeralSession();
@@ -157,26 +308,19 @@ export async function doUpload(
     waitQueue.shift()?.();
   };
 
-  const relParents = isDir
-    ? files.map((f) => {
-        const rp = path.relative(localRoot, path.dirname(f)).split(path.sep).join("/");
-        return rp === "" || rp === "." ? "" : rp;
-      })
-    : files.map(() => "");
-
   await Promise.all(
     files.map(async (f, i) => {
-      const fsize = sizes[i]!;
-      const relParent = relParents[i]!;
+      const fsize = f.size;
       const [host, uri] = pickPool(fsize);
       const ulKey = randA32(6);
       const idx = opts.filenoProvider();
 
       await acquire();
       try {
-        opts.onFileStart?.(idx, f, fsize);
+        opts.onFileStart?.(idx, f.label, fsize);
+        const sourceBytes = await f.open();
 
-        const { token, macs } = await wsUploadOne(host, uri, f, ulKey, {
+        const { token, macs } = await wsUploadOne(host, uri, sourceBytes, ulKey, {
           fileno: idx,
           concurrency,
           size: fsize,
@@ -185,7 +329,7 @@ export async function doUpload(
             perFileSent[i] = sent;
             totalSent += delta;
             opts.onProgress?.(Math.min(totalSent, totalBytes), totalBytes);
-            opts.onFileProgress?.(idx, f, sent, fsize);
+            opts.onFileProgress?.(idx, f.label, sent, fsize);
           },
         });
 
@@ -194,9 +338,9 @@ export async function doUpload(
         totalSent += delta;
         opts.onProgress?.(Math.min(totalSent, totalBytes), totalBytes);
 
-        const targetH = dirHandles.get(relParent) ?? rootH;
-        await api.finaliseFile(targetH, token, ulKey, macs, path.basename(f));
-        opts.onFileDone?.(idx, f, fsize);
+        const targetH = dirHandles.get(f.relParent) ?? rootH;
+        await api.finaliseFile(targetH, token, ulKey, macs, f.basename);
+        opts.onFileDone?.(idx, f.label, fsize);
       } finally {
         release();
       }

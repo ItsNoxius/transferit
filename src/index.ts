@@ -1,5 +1,5 @@
 /**
- * @noxius/transferit — TypeScript/Node client for https://transfer.it.
+ * @noxius/transferit — TypeScript client for https://transfer.it (Node + browser).
  *
  * Port of transferit-py (MIT). Independent community project — not affiliated
  * with MEGA Limited or transfer.it.
@@ -14,6 +14,25 @@ export type {
   UploadResult,
   DownloadResult,
 } from "./models.js";
-export type { UploadOptions } from "./actions-upload.js";
+export type {
+  UploadOptions,
+  UploadSource,
+  UploadEntry,
+} from "./actions-upload.js";
 export type { DownloadOptions } from "./actions-read.js";
-export { DEFAULT_CONCURRENCY } from "./upload.js";
+export { DEFAULT_CONCURRENCY, blobSource, type ByteSource } from "./upload.js";
+export {
+  createDecryptTransform,
+  streamDecrypt,
+  computeFolderPaths,
+} from "./download.js";
+export {
+  downloadViaServiceWorker,
+  downloadNodeViaServiceWorker,
+  ensureServiceWorker,
+  putDownloadJob,
+  triggerServiceWorkerDownload,
+  DL_PREFIX,
+  type BrowserDownloadOptions,
+  type DownloadJob,
+} from "./browser-download.js";

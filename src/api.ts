@@ -1,20 +1,24 @@
 /**
  * MegaAPI — low-level client for the MEGA bt7 API used by transfer.it.
- * Port of transferit-py `_api.py`.
+ * Port of transferit-py `_api.py`. Isomorphic (browser + Node).
  */
 
-import { pbkdf2Sync, randomInt } from "node:crypto";
 import {
   a32ToB64,
   a32ToBytes,
   b64urlDecode,
   b64urlEncode,
+  bytesEqual,
   bytesToA32,
   condenseMacs,
+  concatBytes,
   decryptAttr,
   encryptAttr,
   encryptKeyEcb,
+  pbkdf2Sha256,
   randA32,
+  utf8Encode,
+  utf8Decode,
 } from "./crypto.js";
 import { MegaAPIError } from "./errors.js";
 
@@ -36,6 +40,12 @@ export type JsonValue =
 
 export type ApiPayload = Record<string, JsonValue>;
 
+function randomInt(max: number): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return buf[0]! % max;
+}
+
 export class MegaAPI {
   base: string;
   seqno: number;
@@ -46,7 +56,7 @@ export class MegaAPI {
 
   constructor(base = API_BASE, opts?: { timeout?: number }) {
     this.base = base;
-    this.seqno = randomInt(0, 1_000_000_000);
+    this.seqno = randomInt(1_000_000_000);
     this.timeoutMs = (opts?.timeout ?? 60) * 1000;
   }
 
@@ -74,14 +84,19 @@ export class MegaAPI {
     const body = Array.isArray(payload) ? payload : [payload];
     let data: JsonValue = null;
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    // Browsers forbid setting User-Agent; Node fetch accepts it.
+    if (typeof document === "undefined") {
+      headers["User-Agent"] = USER_AGENT;
+    }
+
     for (let attempt = 0; attempt < 5; attempt++) {
       const ctrl = AbortSignal.timeout(this.timeoutMs);
       const r = await fetch(`${this.base}cs?${params}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": USER_AGENT,
-        },
+        headers,
         body: JSON.stringify(body),
         signal: ctrl,
       });
@@ -134,7 +149,7 @@ export class MegaAPI {
 
     const kEnc = encryptKeyEcb(a32ToBytes(pwKey), masterKey);
     const sscEnc = encryptKeyEcb(a32ToBytes(masterKey), ssc);
-    const ts = Buffer.concat([a32ToBytes(ssc), a32ToBytes(sscEnc)]);
+    const ts = concatBytes(a32ToBytes(ssc), a32ToBytes(sscEnc));
 
     const userHandle = await this.req({
       a: "up",
@@ -160,7 +175,7 @@ export class MegaAPI {
       a32ToBytes(masterKey),
       bytesToA32(tsid.subarray(0, 16)),
     );
-    if (!a32ToBytes(checkEnc).equals(tsid.subarray(tsid.length - 16))) {
+    if (!bytesEqual(a32ToBytes(checkEnc), tsid.subarray(tsid.length - 16))) {
       throw new MegaAPIError("tsid verification failed");
     }
 
@@ -221,7 +236,7 @@ export class MegaAPI {
 
   async finaliseFile(
     transferRoot: string,
-    completionToken: Buffer,
+    completionToken: Uint8Array,
     ulKey: number[],
     macsOrdered: number[][],
     filename: string,
@@ -273,10 +288,10 @@ export class MegaAPI {
     const payload: ApiPayload = { a: "xm", xh };
 
     if (opts.title != null) {
-      payload.t = b64urlEncode(Buffer.from(opts.title.trim(), "utf8"));
+      payload.t = b64urlEncode(utf8Encode(opts.title.trim()));
     }
     if (opts.message != null) {
-      payload.m = b64urlEncode(Buffer.from(opts.message.trim(), "utf8"));
+      payload.m = b64urlEncode(utf8Encode(opts.message.trim()));
     }
     if (opts.sender != null) {
       const se = opts.sender.trim();
@@ -284,7 +299,7 @@ export class MegaAPI {
     }
     if (opts.password != null) {
       const pw = opts.password.trim();
-      if (pw) payload.pw = MegaAPI.derivePassword(xh, pw);
+      if (pw) payload.pw = await MegaAPI.derivePassword(xh, pw);
     }
     if (opts.expirySeconds != null && opts.expirySeconds > 0) {
       payload.e = Math.trunc(opts.expirySeconds);
@@ -326,7 +341,7 @@ export class MegaAPI {
     xh: string,
     opts?: { password?: string | null },
   ): Promise<{ nodes: FetchedNode[]; pwToken: string | null }> {
-    const pwToken = this.resolvePw(xh, opts?.password ?? null);
+    const pwToken = await this.resolvePw(xh, opts?.password ?? null);
     let data: JsonValue;
     try {
       data = await this.req({ a: "f", c: 1, r: 1 }, { x: xh, pw: pwToken });
@@ -338,13 +353,8 @@ export class MegaAPI {
     const nodes: FetchedNode[] = [];
     const list = (resp.f as Record<string, unknown>[]) ?? [];
     for (const n of list) {
-      const kA32 = n.k
-        ? bytesToA32(b64urlDecode(String(n.k)))
-        : [];
-      const attrs =
-        n.a && kA32.length
-          ? decryptAttr(String(n.a), kA32)
-          : null;
+      const kA32 = n.k ? bytesToA32(b64urlDecode(String(n.k))) : [];
+      const attrs = n.a && kA32.length ? decryptAttr(String(n.a), kA32) : null;
       nodes.push({
         h: String(n.h),
         p: String(n.p ?? ""),
@@ -369,14 +379,14 @@ export class MegaAPI {
 
     if (typeof info.t === "string") {
       try {
-        info.title = b64urlDecode(info.t).toString("utf8");
+        info.title = utf8Decode(b64urlDecode(info.t));
       } catch {
         info.title = null;
       }
     }
     if (typeof info.m === "string") {
       try {
-        info.message = b64urlDecode(info.m).toString("utf8");
+        info.message = utf8Decode(b64urlDecode(info.m));
       } catch {
         info.message = null;
       }
@@ -430,24 +440,18 @@ export class MegaAPI {
     throw new Error(`can't extract transfer handle from ${JSON.stringify(urlOrXh)}`);
   }
 
-  static derivePassword(xh: string, password: string): string {
+  static async derivePassword(xh: string, password: string): Promise<string> {
     const xhBytes = b64urlDecode(xh);
-    const salt = Buffer.concat([
-      xhBytes.subarray(xhBytes.length - 6),
-      xhBytes.subarray(xhBytes.length - 6),
-      xhBytes.subarray(xhBytes.length - 6),
-    ]);
-    const dk = pbkdf2Sync(
-      Buffer.from(password.trim(), "utf8"),
-      salt,
-      100_000,
-      32,
-      "sha256",
-    );
+    const tail = xhBytes.subarray(xhBytes.length - 6);
+    const salt = concatBytes(tail, tail, tail);
+    const dk = await pbkdf2Sha256(utf8Encode(password.trim()), salt, 100_000, 32);
     return b64urlEncode(dk);
   }
 
-  private resolvePw(xh: string, password: string | null): string | null {
+  private async resolvePw(
+    xh: string,
+    password: string | null,
+  ): Promise<string | null> {
     if (password == null) return null;
     return MegaAPI.derivePassword(xh, password);
   }

@@ -25,7 +25,7 @@ describe("base64url", () => {
   it.each([[Buffer.alloc(0)], [Buffer.from([0])], [Buffer.from("hello")], [Buffer.alloc(32, 0xff)]])(
     "roundtrips",
     (data) => {
-      expect(b64urlDecode(b64urlEncode(data))).toEqual(data);
+      expect(b64urlDecode(b64urlEncode(data))).toEqual(new Uint8Array(data));
     },
   );
 
@@ -47,7 +47,7 @@ describe("a32", () => {
   });
 
   it("is big-endian", () => {
-    expect(a32ToBytes([0x12345678])).toEqual(Buffer.from([0x12, 0x34, 0x56, 0x78]));
+    expect(a32ToBytes([0x12345678])).toEqual(new Uint8Array([0x12, 0x34, 0x56, 0x78]));
   });
 
   it("b64 roundtrip", () => {
@@ -135,7 +135,9 @@ describe("chunk encryption", () => {
     const data = randomBytes(4096);
     const a = encryptChunkAndMac(data, ulKey, 0);
     const b = encryptChunkAndMac(data, ulKey, 16);
-    expect(a.ciphertext.equals(b.ciphertext)).toBe(false);
+    expect(Buffer.from(a.ciphertext).equals(Buffer.from(b.ciphertext))).toBe(
+      false,
+    );
   });
 
   it("empty chunk MAC is nonce doubled", () => {

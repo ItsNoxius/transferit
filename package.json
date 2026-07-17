@@ -1,7 +1,7 @@
 {
   "name": "@noxius/transferit",
   "version": "0.1.1",
-  "description": "TypeScript/Node client for transfer.it — upload and download via the MEGA backend",
+  "description": "TypeScript client for transfer.it — upload and download via the MEGA backend (Node + browser)",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -16,7 +16,18 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
-    }
+    },
+    "./react": {
+      "import": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      }
+    },
+    "./sw": "./dist/sw-download.js"
   },
   "files": [
     "dist",
@@ -26,6 +37,9 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "browser": {
+    "ws": false
   },
   "scripts": {
     "build": "tsup",
@@ -39,18 +53,29 @@
     "mega",
     "file-sharing",
     "upload",
-    "download"
+    "download",
+    "react"
   ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
     "@types/ws": "^8.5.13",
+    "react": "^19.0.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

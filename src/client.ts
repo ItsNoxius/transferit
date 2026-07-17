@@ -5,7 +5,15 @@
 
 import { MegaAPI } from "./api.js";
 import { doDownload, doInfo, doMetadata, type DownloadOptions } from "./actions-read.js";
-import { doUpload, type UploadOptions } from "./actions-upload.js";
+import {
+  doUpload,
+  type UploadOptions,
+  type UploadSource,
+} from "./actions-upload.js";
+import {
+  downloadViaServiceWorker,
+  type BrowserDownloadOptions,
+} from "./browser-download.js";
 import type {
   DownloadResult,
   TransferInfo,
@@ -53,8 +61,15 @@ export class Transferit {
     return this.fileno;
   }
 
-  async upload(path: string, opts: UploadOptions = {}): Promise<UploadResult> {
-    return doUpload(this.api_, path, {
+  /**
+   * Upload a filesystem path (Node), or a File / Blob / FileList / entry list
+   * (browser).
+   */
+  async upload(
+    source: UploadSource,
+    opts: UploadOptions = {},
+  ): Promise<UploadResult> {
+    return doUpload(this.api_, source, {
       ...opts,
       sender: opts.sender ?? this.defaultSender,
       expiry: opts.expiry ?? this.defaultExpiry,
@@ -64,12 +79,24 @@ export class Transferit {
     });
   }
 
+  /** Node: decrypt transfer files into `outputDir`. */
   async download(
     urlOrXh: string,
     outputDir: string,
     opts: DownloadOptions = {},
   ): Promise<DownloadResult> {
     return doDownload(this.api_, urlOrXh, outputDir, opts);
+  }
+
+  /**
+   * Browser: stream each file through a service worker into the download shelf.
+   * Register `sw-download.js` (from `@noxius/transferit/sw`) at your origin.
+   */
+  async downloadBrowser(
+    urlOrXh: string,
+    opts: BrowserDownloadOptions = {},
+  ): Promise<{ xh: string; started: number; nodes: TransferNode[] }> {
+    return downloadViaServiceWorker(this.api_, urlOrXh, opts);
   }
 
   async info(

@@ -1,6 +1,6 @@
 # @noxius/transferit
 
-TypeScript/Node client for [transfer.it](https://transfer.it) — upload and download via the MEGA backend, no browser required.
+TypeScript client for [transfer.it](https://transfer.it) — upload and download via the MEGA backend (Node.js and browsers).
 
 Port of [transferit-py](https://github.com/viperadnan-git/transferit-py) (MIT). Not affiliated with MEGA or transfer.it.
 
@@ -22,7 +22,85 @@ import {
 npm install @noxius/transferit
 ```
 
-Requires Node.js 20+.
+Requires Node.js 20+ (for the Node filesystem path APIs). Browsers need a secure context (HTTPS or `localhost`) for uploads (WebSocket) and downloads (Service Worker).
+
+---
+
+## Browser
+
+### Upload
+
+Same `upload()` API — pass a `File`, `Blob`, `FileList` (e.g. `<input webkitdirectory>`), or `{ path, blob }[]` instead of a filesystem path:
+
+```ts
+const tx = new Transferit();
+await tx.upload(fileInput.files![0]!);
+await tx.upload(fileInput.files!); // folder picker → preserves relative paths
+```
+
+### Download (Service Worker)
+
+MEGA’s CDN only serves ciphertext. In the browser, register the bundled service worker, then use `downloadBrowser()` so files land in the normal download shelf (streamed decrypt, not held in a Blob):
+
+```bash
+# copy the worker to your site root (or configure serviceWorkerUrl)
+cp node_modules/@noxius/transferit/dist/sw-download.js ./public/sw-download.js
+```
+
+```ts
+import { Transferit } from "@noxius/transferit";
+// or: import "@noxius/transferit/sw"  → resolve to dist/sw-download.js
+
+const tx = new Transferit();
+await tx.downloadBrowser("https://transfer.it/t/xxxxxxxxxxxx", {
+  serviceWorkerUrl: "/sw-download.js",
+  scope: "/",
+});
+```
+
+Demo: `examples/browser-download.html` (`npx --yes serve examples`).
+
+### React (`@noxius/transferit/react`)
+
+Headless hooks — bring your own UI. `react` is an optional peer (`>=18`).
+
+```tsx
+import {
+  TransferitProvider,
+  useUpload,
+  useTransfer,
+} from "@noxius/transferit/react";
+
+function App() {
+  return (
+    <TransferitProvider>
+      <Downloader url="https://transfer.it/t/xxxxxxxxxxxx" />
+    </TransferitProvider>
+  );
+}
+
+function Downloader({ url }: { url: string }) {
+  const transfer = useTransfer(url);
+
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        await transfer.begin();
+        await transfer.download(); // or transfer.download(transfer.nodes[0]!)
+      }}
+    >
+      {transfer.status}
+    </button>
+  );
+}
+```
+
+| Export | Role |
+|--------|------|
+| `TransferitProvider` / `useTransferit` | Shared client |
+| `useUpload` | Upload + progress state |
+| `useTransfer` | List + SW download (`begin` / `download` / `refresh`) |
 
 ---
 
@@ -61,10 +139,13 @@ Upload a **file** or **folder** into a new transfer and get a share URL.
 
 ```ts
 async function upload(
-  path: string,
+  source: string | File | Blob | FileList | UploadEntry[],
   opts?: UploadOptions,
 ): Promise<UploadResult>
 ```
+
+- **Node:** `source` is a filesystem path (file or directory).
+- **Browser:** `source` is a `File` / `Blob` / `FileList` / `{ path, blob }[]`.
 
 Creates an ephemeral MEGA session on first write, builds a transfer container, streams AES-encrypted chunks over WebSockets, then returns `https://transfer.it/t/<xh>`.
 
@@ -194,7 +275,9 @@ console.log(JSON.stringify(result.toJSON(), null, 2));
 
 ## `download`
 
-Mirror a transfer into a local directory. Recreates folder hierarchy. No session required.
+**Node:** mirror a transfer into a local directory. Recreates folder hierarchy. No session required.
+
+**Browser:** use [`downloadBrowser`](#browser) (service worker) instead — there is no filesystem `outputDir`.
 
 ```ts
 async function download(

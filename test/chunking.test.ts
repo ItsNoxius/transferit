@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ONE_MB, iterChunks, walkFolder } from "../src/upload.js";
+import { ONE_MB, iterChunks } from "../src/upload.js";
+import { walkFolder } from "../src/upload-fs.js";
 import { MegaAPI } from "../src/api.js";
 import { parseDuration, castExpirySeconds } from "../src/transfer.js";
 

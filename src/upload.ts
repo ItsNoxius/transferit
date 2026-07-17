@@ -1,12 +1,9 @@
 /**
  * WebSocket upload pipeline.
  * Port of transferit-py `_upload.py` — matches MEGA WsPoolMgr / WsUploadMgr.
+ * Isomorphic: pass a ByteSource (path/Blob/File adapters live elsewhere).
  */
 
-import { open } from "node:fs/promises";
-import path from "node:path";
-import { readdir, stat } from "node:fs/promises";
-import WebSocket from "ws";
 import type { MegaAPI } from "./api.js";
 import { CHUNKMAP, ONE_MB, crc32b, encryptChunkAndMac } from "./crypto.js";
 import { MegaAPIError } from "./errors.js";
@@ -23,6 +20,31 @@ const enum MsgType {
   COMPLETE = 4,
   SHED = 5,
   CHUNK_ACK_ALT = 7,
+}
+
+/** Random-access bytes for the upload pipeline (file path, Blob, etc.). */
+export interface ByteSource {
+  readonly size: number;
+  read(pos: number, length: number): Promise<Uint8Array>;
+  close?(): Promise<void> | void;
+}
+
+export function blobSource(blob: Blob, name?: string): ByteSource & { name: string } {
+  return {
+    size: blob.size,
+    name: name ?? (blob instanceof File ? blob.name : "upload.bin"),
+    async read(pos, length) {
+      if (length === 0) return new Uint8Array(0);
+      const buf = await blob.slice(pos, pos + length).arrayBuffer();
+      const u8 = new Uint8Array(buf);
+      if (u8.length !== length) {
+        throw new MegaAPIError(
+          `short read at ${pos}: got ${u8.length}, want ${length}`,
+        );
+      }
+      return u8;
+    },
+  };
 }
 
 export function iterChunks(size: number): {
@@ -56,10 +78,160 @@ class WsDisconnect extends Error {
   }
 }
 
+interface WsHandle {
+  readonly bufferedAmount: number;
+  send(data: Uint8Array): void;
+  close(): void;
+  onOpen(cb: () => void): void;
+  onMessage(cb: (data: Uint8Array) => void): void;
+  onError(cb: (err: Error) => void): void;
+  onClose(cb: () => void): void;
+}
+
+async function openWs(url: string): Promise<WsHandle> {
+  if (typeof WebSocket !== "undefined") {
+    return openBrowserWs(url);
+  }
+  const { default: WS } = await import("ws");
+  return openNodeWs(url, WS);
+}
+
+function openBrowserWs(url: string): Promise<WsHandle> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    let opened = false;
+    const handle: WsHandle = {
+      get bufferedAmount() {
+        return ws.bufferedAmount;
+      },
+      send(data) {
+        ws.send(data);
+      },
+      close() {
+        ws.close();
+      },
+      onOpen(cb) {
+        if (opened) cb();
+        else ws.addEventListener("open", () => cb(), { once: true });
+      },
+      onMessage(cb) {
+        ws.addEventListener("message", (ev) => {
+          const d = ev.data;
+          cb(d instanceof ArrayBuffer ? new Uint8Array(d) : new Uint8Array(d as ArrayBuffer));
+        });
+      },
+      onError(cb) {
+        ws.addEventListener("error", () => cb(new Error("WebSocket error")));
+      },
+      onClose(cb) {
+        ws.addEventListener("close", () => cb());
+      },
+    };
+    ws.addEventListener(
+      "open",
+      () => {
+        opened = true;
+        resolve(handle);
+      },
+      { once: true },
+    );
+    ws.addEventListener(
+      "error",
+      () => {
+        if (!opened) reject(new Error("WebSocket connect failed"));
+      },
+      { once: true },
+    );
+  });
+}
+
+function openNodeWs(
+  url: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  WS: any,
+): Promise<WsHandle> {
+  return new Promise((resolve, reject) => {
+    const ws = new WS(url);
+    let opened = false;
+    const handle: WsHandle = {
+      get bufferedAmount() {
+        return ws.bufferedAmount as number;
+      },
+      send(data) {
+        ws.send(data);
+      },
+      close() {
+        ws.close();
+      },
+      onOpen(cb) {
+        if (opened) cb();
+        else ws.once("open", cb);
+      },
+      onMessage(cb) {
+        ws.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
+          if (Buffer.isBuffer(data)) cb(new Uint8Array(data));
+          else if (data instanceof ArrayBuffer) cb(new Uint8Array(data));
+          else cb(new Uint8Array(Buffer.concat(data as Buffer[])));
+        });
+      },
+      onError(cb) {
+        ws.on("error", (err: Error) => cb(err));
+      },
+      onClose(cb) {
+        ws.on("close", cb);
+      },
+    };
+    ws.once("open", () => {
+      opened = true;
+      resolve(handle);
+    });
+    ws.once("error", (err: Error) => {
+      if (!opened) reject(err);
+    });
+  });
+}
+
+function writeU32LE(buf: Uint8Array, offset: number, value: number): void {
+  const v = value >>> 0;
+  buf[offset] = v & 0xff;
+  buf[offset + 1] = (v >>> 8) & 0xff;
+  buf[offset + 2] = (v >>> 16) & 0xff;
+  buf[offset + 3] = (v >>> 24) & 0xff;
+}
+
+function writeU64LE(buf: Uint8Array, offset: number, value: number): void {
+  const lo = value >>> 0;
+  const hi = Math.floor(value / 0x100000000) >>> 0;
+  writeU32LE(buf, offset, lo);
+  writeU32LE(buf, offset + 4, hi);
+}
+
+function readU32LE(buf: Uint8Array, offset: number): number {
+  return (
+    (buf[offset]! |
+      (buf[offset + 1]! << 8) |
+      (buf[offset + 2]! << 16) |
+      (buf[offset + 3]! << 24)) >>>
+    0
+  );
+}
+
+function readI8(buf: Uint8Array, offset: number): number {
+  const v = buf[offset]!;
+  return v > 127 ? v - 256 : v;
+}
+
+function readU64LE(buf: Uint8Array, offset: number): number {
+  const lo = readU32LE(buf, offset);
+  const hi = readU32LE(buf, offset + 4);
+  return hi * 0x100000000 + lo;
+}
+
 export async function wsUploadOne(
   wsHost: string,
   wsUri: string,
-  filePath: string,
+  source: ByteSource,
   ulKey: number[],
   opts: {
     fileno?: number;
@@ -67,11 +239,11 @@ export async function wsUploadOne(
     size?: number;
     progress?: (sent: number, total: number) => void;
   } = {},
-): Promise<{ token: Buffer; macs: number[][] }> {
+): Promise<{ token: Uint8Array; macs: number[][] }> {
   const url = `wss://${wsHost}/${wsUri}`;
   const fileno = opts.fileno ?? 1;
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY;
-  const size = opts.size ?? (await stat(filePath)).size;
+  const size = opts.size ?? source.size;
   const progress = opts.progress;
 
   const { chunks: chunkOffsets, needEmptyTail } = iterChunks(size);
@@ -83,7 +255,7 @@ export async function wsUploadOne(
   if (needEmptyTail) unackedLengths.set(size, 0);
 
   const macsByOffset = new Map<number, number[]>();
-  let completionToken: Buffer | null = null;
+  let completionToken: Uint8Array | null = null;
   let done = false;
   let bytesAcked = 0;
   const failReason: { err: Error | null } = { err: null };
@@ -110,7 +282,6 @@ export async function wsUploadOne(
       waiters.add(onWake);
     });
 
-  const fh = await open(filePath, "r");
   let fileLock = Promise.resolve();
   const withFileLock = <T>(fn: () => Promise<T>): Promise<T> => {
     const run = fileLock.then(fn, fn);
@@ -130,21 +301,9 @@ export async function wsUploadOne(
     if (chunks.length) workQueue.unshift(...chunks);
   };
 
-  const readAndEncrypt = async (
-    pos: number,
-    length: number,
-  ): Promise<Buffer> =>
+  const readAndEncrypt = async (pos: number, length: number): Promise<Uint8Array> =>
     withFileLock(async () => {
-      const buf = Buffer.alloc(length);
-      if (length > 0) {
-        const { bytesRead } = await fh.read(buf, 0, length, pos);
-        if (bytesRead !== length) {
-          throw new MegaAPIError(
-            `short read at ${pos}: got ${bytesRead}, want ${length}`,
-          );
-        }
-      }
-      const data = length ? buf : Buffer.alloc(0);
+      const data = length ? await source.read(pos, length) : new Uint8Array(0);
       const { ciphertext, mac } = encryptChunkAndMac(data, ulKey, pos);
       macsByOffset.set(pos, mac);
       return ciphertext;
@@ -178,16 +337,14 @@ export async function wsUploadOne(
     while (!done) {
       try {
         await new Promise<void>((resolve, reject) => {
-          const ws = new WebSocket(url);
           let settled = false;
+          let ws: WsHandle | null = null;
+
           const finish = (err?: Error) => {
             if (settled) return;
             settled = true;
             try {
-              ws.removeAllListeners();
-              if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-                ws.close();
-              }
+              ws?.close();
             } catch {
               /* ignore */
             }
@@ -195,113 +352,106 @@ export async function wsUploadOne(
             else resolve();
           };
 
-          ws.once("error", (err) => finish(err));
-          ws.once("close", () => {
-            if (!settled && !done) {
-              finish(new WsDisconnect("connection closed"));
-            } else if (!settled) {
-              finish();
-            }
-          });
+          void (async () => {
+            try {
+              ws = await openWs(url);
+              ws.onError((err) => finish(err));
+              ws.onClose(() => {
+                if (!settled && !done) finish(new WsDisconnect("connection closed"));
+                else if (!settled) finish();
+              });
 
-          ws.once("open", () => {
-            void (async () => {
-              try {
-                while (!done) {
-                  const now = Date.now();
-                  for (const [pos, { deadline }] of inFlight) {
-                    if (now > deadline) {
-                      throw new WsDisconnect(`ack timeout pos=${pos}`);
-                    }
+              ws.onMessage((mview) => {
+                try {
+                  if (mview.length < 9) return;
+                  const body = mview.subarray(0, mview.length - 4);
+                  const mcrc = readU32LE(mview, mview.length - 4);
+                  if (crc32b(body) !== mcrc) {
+                    throw new MegaAPIError("ws CRC mismatch on server msg");
                   }
+                  const mtype = readI8(mview, 12);
+                  if (mtype < 0) {
+                    throw new MegaAPIError(
+                      `server signalled upload error type=${mtype}`,
+                    );
+                  }
+                  const mpos = readU64LE(mview, 4);
+                  if (mtype === MsgType.CHUNK_ACK || mtype === MsgType.CHUNK_ACK_ALT) {
+                    inFlight.delete(mpos);
+                    recordAck(mpos);
+                  } else if (mtype === MsgType.CRC_FAIL) {
+                    throw new MegaAPIError(
+                      `server reports chunk CRC fail at offset ${mpos}`,
+                    );
+                  } else if (mtype === MsgType.COMPLETE) {
+                    const tlen = body[13]!;
+                    completionToken = body.subarray(14, 14 + tlen).slice();
+                    markDone();
+                    finish();
+                  } else if (mtype === MsgType.SHED) {
+                    throw new WsDisconnect("server requested reconnect");
+                  }
+                } catch (err) {
+                  if (err instanceof WsDisconnect) {
+                    finish(err);
+                  } else {
+                    failReason.err =
+                      err instanceof Error ? err : new Error(String(err));
+                    markDone();
+                    finish(failReason.err);
+                  }
+                }
+              });
 
-                  const chunk = takeChunk();
-                  if (chunk == null) {
-                    if (inFlight.size === 0 && workQueue.length === 0) {
-                      await waitDoneOr(100);
-                      if (done) break;
-                      continue;
-                    }
+              while (!done) {
+                const now = Date.now();
+                for (const [pos, { deadline }] of inFlight) {
+                  if (now > deadline) {
+                    throw new WsDisconnect(`ack timeout pos=${pos}`);
+                  }
+                }
+
+                const chunk = takeChunk();
+                if (chunk == null) {
+                  if (inFlight.size === 0 && workQueue.length === 0) {
                     await waitDoneOr(100);
+                    if (done) break;
                     continue;
                   }
-
-                  const [pos, length] = chunk;
-
-                  while (!done && ws.bufferedAmount >= WS_BUFFER_LIMIT) {
-                    await waitDoneOr(10);
-                  }
-                  if (done) {
-                    prepend([chunk]);
-                    break;
-                  }
-
-                  const ct = await readAndEncrypt(pos, length);
-                  const header = Buffer.alloc(20);
-                  header.writeUInt32LE(fileno, 0);
-                  header.writeBigUInt64LE(BigInt(pos), 4);
-                  header.writeUInt32LE(length, 12);
-                  const crc = crc32b(ct, crc32b(header.subarray(0, 16)));
-                  header.writeUInt32LE(crc, 16);
-
-                  inFlight.set(pos, {
-                    length,
-                    deadline: Date.now() + ACK_TIMEOUT_MS,
-                  });
-                  ws.send(header);
-                  if (ct.length) ws.send(ct);
+                  await waitDoneOr(100);
+                  continue;
                 }
-                finish();
-              } catch (err) {
-                finish(err instanceof Error ? err : new Error(String(err)));
-              }
-            })();
-          });
 
-          ws.on("message", (data) => {
-            try {
-              const mview = Buffer.isBuffer(data)
-                ? data
-                : Buffer.from(data as ArrayBuffer);
-              if (mview.length < 9) return;
-              const body = mview.subarray(0, mview.length - 4);
-              const mcrc = mview.readUInt32LE(mview.length - 4);
-              if (crc32b(body) !== mcrc) {
-                throw new MegaAPIError("ws CRC mismatch on server msg");
+                const [pos, length] = chunk;
+
+                while (!done && ws.bufferedAmount >= WS_BUFFER_LIMIT) {
+                  await waitDoneOr(10);
+                }
+                if (done) {
+                  prepend([chunk]);
+                  break;
+                }
+
+                const ct = await readAndEncrypt(pos, length);
+                const header = new Uint8Array(20);
+                writeU32LE(header, 0, fileno);
+                writeU64LE(header, 4, pos);
+                writeU32LE(header, 12, length);
+                const crc = crc32b(ct, crc32b(header.subarray(0, 16)));
+                writeU32LE(header, 16, crc);
+
+                inFlight.set(pos, {
+                  length,
+                  deadline: Date.now() + ACK_TIMEOUT_MS,
+                });
+                ws.send(header);
+                if (ct.length) ws.send(ct);
               }
-              const mtype = mview.readInt8(12);
-              if (mtype < 0) {
-                throw new MegaAPIError(
-                  `server signalled upload error type=${mtype}`,
-                );
-              }
-              const mpos = Number(mview.readBigUInt64LE(4));
-              if (mtype === MsgType.CHUNK_ACK || mtype === MsgType.CHUNK_ACK_ALT) {
-                inFlight.delete(mpos);
-                recordAck(mpos);
-              } else if (mtype === MsgType.CRC_FAIL) {
-                throw new MegaAPIError(
-                  `server reports chunk CRC fail at offset ${mpos}`,
-                );
-              } else if (mtype === MsgType.COMPLETE) {
-                const tlen = body[13]!;
-                completionToken = Buffer.from(body.subarray(14, 14 + tlen));
-                markDone();
-                finish();
-              } else if (mtype === MsgType.SHED) {
-                throw new WsDisconnect("server requested reconnect");
-              }
+              finish();
             } catch (err) {
-              if (err instanceof WsDisconnect) {
-                finish(err);
-              } else {
-                failReason.err =
-                  err instanceof Error ? err : new Error(String(err));
-                markDone();
-                finish(failReason.err);
-              }
+              finish(err instanceof Error ? err : new Error(String(err)));
             }
-          });
+          })();
         });
 
         dropInFlight();
@@ -328,7 +478,7 @@ export async function wsUploadOne(
   try {
     await Promise.all(Array.from({ length: n }, (_, i) => worker(i)));
   } finally {
-    await fh.close();
+    await source.close?.();
   }
 
   if (failReason.err) throw failReason.err;
@@ -345,54 +495,6 @@ export async function wsUploadOne(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function matchGlob(name: string, pattern: string): boolean {
-  // Minimal fnmatch-style: *, ?, and path separators as literals.
-  const esc = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".");
-  return new RegExp(`^${esc}$`, "i").test(name);
-}
-
-export async function walkFolder(
-  root: string,
-  opts?: { exclude?: Iterable<string> },
-): Promise<{ files: string[]; dirRelPaths: string[] }> {
-  const st = await stat(root);
-  if (!st.isDirectory()) throw new Error(`Not a directory: ${root}`);
-
-  const patterns = [...(opts?.exclude ?? [])];
-  const matches = (name: string, rel: string) =>
-    patterns.some((pat) => matchGlob(name, pat) || matchGlob(rel, pat));
-
-  const files: string[] = [];
-  const dirSet = new Set<string>();
-
-  async function walk(dir: string, relPosix: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-
-    for (const ent of entries) {
-      const rel = relPosix ? `${relPosix}/${ent.name}` : ent.name;
-      if (patterns.length && matches(ent.name, rel)) continue;
-
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        dirSet.add(rel);
-        await walk(full, rel);
-      } else if (ent.isFile()) {
-        files.push(full);
-      }
-    }
-  }
-
-  await walk(root, "");
-  const dirRelPaths = [...dirSet].sort(
-    (a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b),
-  );
-  return { files, dirRelPaths };
 }
 
 export async function buildRemoteTree(
