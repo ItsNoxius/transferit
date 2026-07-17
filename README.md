@@ -1,8 +1,8 @@
 # @noxius/transferit
 
-TypeScript/Node client for [transfer.it](https://transfer.it) — upload and download files via the MEGA backend, no browser required.
+TypeScript/Node client for [transfer.it](https://transfer.it) — upload and download via the MEGA backend, no browser required.
 
-Port of [transferit-py](https://github.com/viperadnan-git/transferit-py) (MIT). Independent community project — **not** affiliated with MEGA Limited or transfer.it.
+Port of [transferit-py](https://github.com/viperadnan-git/transferit-py) (MIT). Not affiliated with MEGA or transfer.it.
 
 ```ts
 import { Transferit } from "@noxius/transferit";
@@ -19,47 +19,34 @@ await tx.close();
 npm install @noxius/transferit
 ```
 
-Requires **Node.js 20+**.
+Requires Node.js 20+.
 
-## Library API
+## API
 
-| Method | Returns | Needs session? |
-|--------|---------|----------------|
-| `tx.upload(path, opts?)` | `UploadResult` | yes (lazy ephemeral account) |
-| `tx.download(url, dir, opts?)` | `DownloadResult` | no |
-| `tx.info(url, opts?)` | `TransferNode[]` | no |
-| `tx.metadata(url, opts?)` | `TransferInfo` | no |
+| Method | Returns | Session? |
+|--------|---------|----------|
+| `upload(path, opts?)` | `UploadResult` | yes (lazy) |
+| `download(url, dir, opts?)` | `DownloadResult` | no |
+| `info(url, opts?)` | `TransferNode[]` | no |
+| `metadata(url, opts?)` | `TransferInfo` | no |
 
-### Upload options
-
-Mirrors the web form: `title`, `message`, `password`, `sender`, `expiry` (seconds or `"7d"`), `notifyExpiry`, `maxDownloads`, `recipients`, `schedule`, `concurrency` (default 8), `parallel`, `exclude`, plus progress callbacks.
+Upload options match the web form: `title`, `message`, `password`, `sender`, `expiry` (`7d` or seconds), `notifyExpiry`, `maxDownloads`, `recipients`, `schedule`, `concurrency`, `parallel`, `exclude`, and progress callbacks.
 
 ```ts
+const tx = new Transferit({
+  defaultSender: "me@example.com",
+  defaultExpiry: "7d",
+});
+
 await tx.upload("./project", {
   title: "Q1 demo",
-  sender: "me@example.com",
-  expiry: "7d",
   password: "hunter2",
   recipients: ["alice@example.com"],
   onProgress: (sent, total) => console.log(`${sent}/${total}`),
 });
 ```
 
-### Defaults
-
-```ts
-new Transferit({
-  defaultSender: "me@example.com",
-  defaultExpiry: "7d",
-  defaultConcurrency: 8,
-});
-```
-
-### Low-level
-
-`MegaAPI` exposes every bt7 command (`createEphemeralSession`, `createTransfer`, `finaliseFile`, …). Inject via `new Transferit({ api })` for testing.
-
-Protocol details: [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
+Low-level `MegaAPI` is available via `tx.api` or `new Transferit({ api })`. Protocol notes: [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
 
 ## Development
 
@@ -67,40 +54,11 @@ Protocol details: [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
 npm install
 npm test
 npm run build
-TRANSFERIT_LIVE=1 npm test   # optional live upload/download smoke
+TRANSFERIT_LIVE=1 npm test   # live upload/download smoke
 ```
-
-## Publish
-
-### Trusted publishing (recommended)
-
-1. Publish the package once (or create it on npmjs.com), then open **Package settings → Trusted Publisher**.
-2. Set:
-   - **Organization or user:** `ItsNoxius`
-   - **Repository:** `transferit`
-   - **Workflow filename:** `publish.yml`
-3. Release by tagging:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The [publish workflow](.github/workflows/publish.yml) builds, tests, and runs `npm publish` via OIDC (no `NPM_TOKEN`).
-
-### Manual
-
-```bash
-npm login
-npm publish
-```
-
-Scoped package uses `"publishConfig": { "access": "public" }`.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Crypto/protocol implementation adapted from transferit-py © Adnan Ahmad.
+MIT — see [`LICENSE`](LICENSE). Protocol implementation adapted from transferit-py © Adnan Ahmad.
 
-## Disclaimer
-
-Before using this library, ensure your usage complies with [transfer.it's terms](https://transfer.it/terms), [MEGA's terms](https://mega.io/terms), and applicable law. You are responsible for content you upload. Software is provided “as is”, without warranty.
+Use of this library must comply with [transfer.it](https://transfer.it/terms) and [MEGA](https://mega.io/terms) terms. Provided as-is, without warranty.
