@@ -6,19 +6,20 @@
  */
 
 import type { MegaAPI } from "./api.js";
+import {
+  DL_PREFIX,
+  putDownloadJob,
+  type DownloadJob,
+} from "./dl-job.js";
 import type { TransferNode } from "./models.js";
 
-export const DL_PREFIX = "/__transferit_dl__/";
-export const DL_DB_NAME = "transferit-dl";
-export const DL_STORE = "jobs";
-
-export interface DownloadJob {
-  id: string;
-  cdnUrl: string;
-  keyA32: number[];
-  size: number;
-  filename: string;
-}
+export {
+  DL_PREFIX,
+  DL_DB_NAME,
+  DL_STORE,
+  putDownloadJob,
+  type DownloadJob,
+} from "./dl-job.js";
 
 export interface BrowserDownloadOptions {
   password?: string | null;
@@ -28,28 +29,6 @@ export interface BrowserDownloadOptions {
   scope?: string;
   onFileStart?: (node: TransferNode) => void;
   onFileDone?: (node: TransferNode) => void;
-}
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DL_DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(DL_STORE)) db.createObjectStore(DL_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-export async function putDownloadJob(job: DownloadJob): Promise<void> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DL_STORE, "readwrite");
-    tx.objectStore(DL_STORE).put(job, job.id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
 }
 
 export async function ensureServiceWorker(
@@ -139,12 +118,20 @@ export async function downloadNodeViaServiceWorker(
   api: MegaAPI,
   xh: string,
   node: TransferNode,
-  opts?: { pwToken?: string | null; serviceWorkerUrl?: string; scope?: string },
+  opts?: {
+    pwToken?: string | null;
+    serviceWorkerUrl?: string;
+    scope?: string;
+    /** Skip register when caller already ensured (default true = ensure). */
+    ensure?: boolean;
+  },
 ): Promise<void> {
-  await ensureServiceWorker(
-    opts?.serviceWorkerUrl ?? "/sw-download.js",
-    opts?.scope ?? "/",
-  );
+  if (opts?.ensure !== false) {
+    await ensureServiceWorker(
+      opts?.serviceWorkerUrl ?? "/sw-download.js",
+      opts?.scope ?? "/",
+    );
+  }
   const dl = await api.getDownloadUrl(xh, node.handle, {
     pwToken: opts?.pwToken ?? null,
   });

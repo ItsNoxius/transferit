@@ -3,7 +3,6 @@
  * Port of transferit-py `_download.py`.
  */
 
-import { createCtrDecipher } from "./crypto.js";
 import { createDecryptTransform } from "./decrypt-stream.js";
 
 export { createDecryptTransform } from "./decrypt-stream.js";
@@ -43,7 +42,7 @@ export async function streamDecrypt(
   return resp.body.pipeThrough(createDecryptTransform(keyA32, size));
 }
 
-/** Node: decrypt CDN stream to a local file path. */
+/** Node: decrypt CDN stream to a local file path (same CTR path as browser/SW). */
 export async function streamDecryptToFile(
   url: string,
   outPath: string,
@@ -59,43 +58,24 @@ export async function streamDecryptToFile(
 
   await mkdir(path.dirname(outPath), { recursive: true });
 
-  const resp = await fetch(url);
-  if (!resp.ok || !resp.body) {
-    throw new Error(`download HTTP ${resp.status} ${resp.statusText}`);
+  const plain = await streamDecrypt(url, keyA32, size);
+  const nodeReadable = Readable.fromWeb(
+    plain as import("node:stream/web").ReadableStream,
+  );
+  const dest = createWriteStream(outPath);
+
+  if (!onProgress) {
+    await pipeline(nodeReadable, dest);
+    return;
   }
 
-  const decipher = createCtrDecipher(keyA32, 0);
   let written = 0;
-
-  const decrypt = new Transform({
+  const progress = new Transform({
     transform(chunk, _enc, cb) {
-      try {
-        const buf = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        const plain = decipher.update(buf);
-        written += plain.length;
-        if (onProgress) onProgress(written, size);
-        cb(null, Buffer.from(plain));
-      } catch (err) {
-        cb(err as Error);
-      }
-    },
-    flush(cb) {
-      try {
-        const rest = decipher.final();
-        if (rest.length) {
-          written += rest.length;
-          if (onProgress) onProgress(written, size);
-          this.push(Buffer.from(rest));
-        }
-        cb();
-      } catch (err) {
-        cb(err as Error);
-      }
+      written += chunk.length;
+      onProgress(written, size);
+      cb(null, chunk);
     },
   });
-
-  const nodeReadable = Readable.fromWeb(
-    resp.body as import("node:stream/web").ReadableStream,
-  );
-  await pipeline(nodeReadable, decrypt, createWriteStream(outPath));
+  await pipeline(nodeReadable, progress, dest);
 }

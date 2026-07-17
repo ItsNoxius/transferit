@@ -219,23 +219,6 @@ export function encryptChunkAndMac(
   return { ciphertext, mac: bytesToA32(macBytes) };
 }
 
-/** Decrypt AES-CTR stream starting at byte offset (usually 0). */
-export function createCtrDecipher(keyA32: number[], startByte = 0) {
-  const aesKey = attrKey(keyA32);
-  const nonce = a32ToBytes(keyA32.slice(4, 6));
-  let offset = startByte;
-  return {
-    update(chunk: Uint8Array): Uint8Array {
-      const plain = aesCtr(aesKey, nonce, chunk, offset);
-      offset += chunk.length;
-      return plain;
-    },
-    final(): Uint8Array {
-      return new Uint8Array(0);
-    },
-  };
-}
-
 export function condenseMacs(macs: number[][], ulKey: number[]): number[] {
   let acc = [0, 0, 0, 0];
   const keyBytes = a32ToBytes(ulKey.slice(0, 4));

@@ -22,12 +22,9 @@ export interface UseTransferResult {
   info: TransferInfo | null;
   xh: string | null;
   error: Error | null;
-  /**
-   * Register the service worker (if needed) and load nodes + metadata.
-   * Call this before download.
-   */
+  /** Load nodes + metadata (no service worker). Call before download. */
   begin: () => Promise<void>;
-  /** Re-fetch nodes + metadata (same as begin without resetting download state first). */
+  /** Re-fetch nodes + metadata. */
   refresh: () => Promise<void>;
   /** Download every file, or a single node, via the service worker. */
   download: {
@@ -39,6 +36,8 @@ export interface UseTransferResult {
 
 /**
  * Headless transfer handle: list a share, then stream downloads through the SW.
+ *
+ * Listing does not register a service worker. Download ensures once.
  *
  * ```ts
  * const transfer = useTransfer(url, { password });
@@ -87,7 +86,6 @@ export function useTransfer(
     setError(null);
 
     try {
-      await ensureServiceWorker(swUrl, swScope);
       const [listed, meta] = await Promise.all([
         client.info(target, { password }),
         client.metadata(target, { password }),
@@ -111,17 +109,7 @@ export function useTransfer(
       setStatus("error");
       throw e;
     }
-  }, [client, password, swUrl, swScope]);
-
-  const begin = useCallback(async () => {
-    if (busy.current) throw new Error("transfer already in progress");
-    busy.current = true;
-    try {
-      await load();
-    } finally {
-      busy.current = false;
-    }
-  }, [load]);
+  }, [client, password]);
 
   const refresh = useCallback(async () => {
     if (busy.current) throw new Error("transfer already in progress");
@@ -133,11 +121,12 @@ export function useTransfer(
     }
   }, [load]);
 
+  const begin = refresh;
+
   const download = useCallback(
     (async (node?: TransferNode) => {
-      const target = urlRef.current?.trim();
       const currentXh = xhRef.current;
-      if (!target || !currentXh) {
+      if (!currentXh) {
         throw new Error("call begin() before download()");
       }
       if (busy.current) throw new Error("transfer already in progress");
@@ -151,13 +140,20 @@ export function useTransfer(
         const pwToken = password
           ? await MegaAPI.derivePassword(currentXh, password)
           : null;
+        const swOpts = {
+          pwToken,
+          serviceWorkerUrl: swUrl,
+          scope: swScope,
+          ensure: false as const,
+        };
 
         if (node) {
-          await downloadNodeViaServiceWorker(client.api, currentXh, node, {
-            pwToken,
-            serviceWorkerUrl: swUrl,
-            scope: swScope,
-          });
+          await downloadNodeViaServiceWorker(
+            client.api,
+            currentXh,
+            node,
+            swOpts,
+          );
           setStatus("done");
           return;
         }
@@ -165,11 +161,12 @@ export function useTransfer(
         const files = nodesRef.current.filter((n) => n.isFile);
         let started = 0;
         for (const n of files) {
-          await downloadNodeViaServiceWorker(client.api, currentXh, n, {
-            pwToken,
-            serviceWorkerUrl: swUrl,
-            scope: swScope,
-          });
+          await downloadNodeViaServiceWorker(
+            client.api,
+            currentXh,
+            n,
+            swOpts,
+          );
           started++;
         }
         setStatus("done");

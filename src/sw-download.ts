@@ -6,18 +6,15 @@
  * /__transferit_dl__/<jobId>
  *
  * Ship this file at your site root (or configure serviceWorkerUrl).
- * Built as dist/sw-download.js — also mirrored at examples/sw-download.js.
+ * Built as dist/sw-download.js.
  */
 
 /// <reference lib="webworker" />
 
 import { createDecryptTransform } from "./decrypt-stream.js";
+import { DL_PREFIX, takeDownloadJob } from "./dl-job.js";
 
 declare const self: ServiceWorkerGlobalScope;
-
-const DB_NAME = "transferit-dl";
-const STORE = "jobs";
-const DL_PREFIX = "/__transferit_dl__/";
 
 self.addEventListener("install", (e) => {
   e.waitUntil(self.skipWaiting());
@@ -36,52 +33,17 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(handleDownload(id));
 });
 
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-interface Job {
-  id: string;
-  cdnUrl: string;
-  keyA32: number[];
-  size: number;
-  filename: string;
-}
-
-async function takeJob(id: string): Promise<Job | null> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    const store = tx.objectStore(STORE);
-    const getReq = store.get(id);
-    getReq.onsuccess = () => {
-      const job = getReq.result as Job | undefined;
-      if (job) store.delete(id);
-      resolve(job ?? null);
-    };
-    getReq.onerror = () => reject(getReq.error);
-  });
-}
-
 function contentDisposition(filename: string): string {
   const safe = String(filename || "download").replace(/[\r\n"]/g, "_");
   const encoded = encodeURIComponent(safe).replace(
-    /['()]/g,
+    /['()*]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
   return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
 }
 
 async function handleDownload(id: string): Promise<Response> {
-  const job = await takeJob(id);
+  const job = await takeDownloadJob(id);
   if (!job) {
     return new Response("Download job not found or already used.", {
       status: 404,

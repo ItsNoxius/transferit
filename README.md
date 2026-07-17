@@ -117,8 +117,6 @@ Returns `{ xh, started, nodes }` — `started` is how many downloads were queued
 
 Lower-level helpers (also exported): `ensureServiceWorker`, `downloadViaServiceWorker`, `downloadNodeViaServiceWorker`, `triggerServiceWorkerDownload`.
 
-Demo: `examples/browser-download.html` (`npx --yes serve examples`).
-
 ### React (`@noxius/transferit/react`)
 
 Headless hooks — bring your own UI. `react` is an optional peer (`>=18`).
