@@ -18,6 +18,8 @@ import {
 } from "./upload.js";
 
 export interface UploadOptions {
+  /** Override the stored filename for a single-file upload (not a path). */
+  filename?: string | null;
   title?: string | null;
   message?: string | null;
   password?: string | null;
@@ -237,6 +239,20 @@ export async function doUpload(
   expirySeconds = castExpirySeconds(expirySeconds ?? null);
 
   const prepared = await prepareSource(source, opts);
+  if (opts.filename != null) {
+    if (
+      !opts.filename.trim() ||
+      opts.filename === "." ||
+      opts.filename === ".." ||
+      /[/\\\0]/.test(opts.filename)
+    ) {
+      throw new Error("filename must be a non-empty filename, not a path");
+    }
+    if (prepared.files.length !== 1) {
+      throw new Error("filename requires exactly one file to upload");
+    }
+    prepared.files[0]!.basename = opts.filename;
+  }
   const { title, dirRelPaths } = prepared;
   const files = [...prepared.files].sort((a, b) => a.size - b.size);
 

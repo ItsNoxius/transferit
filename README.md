@@ -249,6 +249,20 @@ await tx.upload("./demo.mp4", {
 });
 ```
 
+### Override the uploaded filename
+
+Use `filename` to rename the file stored in the transfer, for example to add a missing extension:
+
+```ts
+await tx.upload(file, { filename: "rename.mp4" });
+// Node: await tx.upload("./video", { filename: "rename.mp4" });
+```
+
+`title` sets the transfer title separately. `filename` requires exactly one file,
+also works with a `Blob`, `FileList`, or entry list, and preserves the source file
+and any parent folders. Supply a filename, not a path. Without `filename`, the
+original naming behavior is preserved.
+
 ### Send files (recipients + schedule)
 
 `sender` is **required** whenever you set message, password, expiry, notify-on-expiry, or recipients.
@@ -304,6 +318,7 @@ await tx.upload("./big.bin", {
 | Option | Type | Notes |
 |--------|------|-------|
 | `title` | `string` | Transfer title; defaults to basename of `path` |
+| `filename` | `string` | Stored filename override; requires exactly one file; cannot contain `/`, `\`, or NUL |
 | `message` | `string` | Landing-page message (requires `sender`) |
 | `password` | `string` | Protects the transfer (requires `sender`) |
 | `sender` | `string` | Sender email; required for most extras |
