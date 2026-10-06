@@ -219,6 +219,52 @@ export function encryptChunkAndMac(
   return { ciphertext, mac: bytesToA32(macBytes) };
 }
 
+export type ChunkEncryptor = (
+  data: Uint8Array,
+  byteOffset: number,
+) => Promise<{ ciphertext: Uint8Array; mac: number[] }>;
+
+/** Native AES for upload chunks, with keys imported once per file. */
+export async function createChunkEncryptor(ulKey: number[]): Promise<ChunkEncryptor> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return async (data, offset) => encryptChunkAndMac(data, ulKey, offset);
+
+  const keyBytes = a32ToBytes(ulKey.slice(0, 4));
+  const nonce = a32ToBytes(ulKey.slice(4, 6));
+  const iv = concatBytes(nonce, nonce);
+  const [ctrKey, cbcKey] = await Promise.all([
+    subtle.importKey("raw", keyBytes as BufferSource, "AES-CTR", false, ["encrypt"]),
+    subtle.importKey("raw", keyBytes as BufferSource, "AES-CBC", false, ["encrypt"]),
+  ]);
+
+  return async (data, byteOffset) => {
+    if (data.length > ONE_MB) {
+      throw new Error("caller must split reads into <= 1 MiB pieces");
+    }
+    if (!data.length || byteOffset % 16) {
+      return encryptChunkAndMac(data, ulKey, byteOffset);
+    }
+
+    const counter = new Uint8Array(16);
+    counter.set(nonce);
+    const view = new DataView(counter.buffer);
+    const blockOffset = byteOffset / 16;
+    view.setUint32(8, Math.floor(blockOffset / 0x100000000), false);
+    view.setUint32(12, blockOffset >>> 0, false);
+
+    const padLen = (16 - (data.length % 16)) % 16;
+    const padded = padLen ? concatBytes(data, new Uint8Array(padLen)) : data;
+    const [ciphertext, cbc] = await Promise.all([
+      subtle.encrypt({ name: "AES-CTR", counter, length: 64 }, ctrKey, data as BufferSource),
+      subtle.encrypt({ name: "AES-CBC", iv: iv as BufferSource }, cbcKey, padded as BufferSource),
+    ]);
+    // WebCrypto adds PKCS#7 padding to the already zero-padded chunk.
+    // MEGA's MAC is the block before that extra padding block.
+    const mac = new Uint8Array(cbc, cbc.byteLength - 32, 16);
+    return { ciphertext: new Uint8Array(ciphertext), mac: bytesToA32(mac) };
+  };
+}
+
 export function condenseMacs(macs: number[][], ulKey: number[]): number[] {
   let acc = [0, 0, 0, 0];
   const keyBytes = a32ToBytes(ulKey.slice(0, 4));

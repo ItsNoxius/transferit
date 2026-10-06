@@ -5,7 +5,7 @@
  */
 
 import type { MegaAPI } from "./api.js";
-import { CHUNKMAP, ONE_MB, crc32b, encryptChunkAndMac } from "./crypto.js";
+import { CHUNKMAP, ONE_MB, crc32b, createChunkEncryptor, type ChunkEncryptor } from "./crypto.js";
 import { MegaAPIError } from "./errors.js";
 
 export { ONE_MB };
@@ -301,10 +301,11 @@ export async function wsUploadOne(
     if (chunks.length) workQueue.unshift(...chunks);
   };
 
+  let encryptChunk: ChunkEncryptor;
   const readAndEncrypt = async (pos: number, length: number): Promise<Uint8Array> =>
     withFileLock(async () => {
       const data = length ? await source.read(pos, length) : new Uint8Array(0);
-      const { ciphertext, mac } = encryptChunkAndMac(data, ulKey, pos);
+      const { ciphertext, mac } = await encryptChunk(data, pos);
       macsByOffset.set(pos, mac);
       return ciphertext;
     });
@@ -476,6 +477,7 @@ export async function wsUploadOne(
 
   const n = Math.max(1, Math.min(concurrency, totalChunks));
   try {
+    encryptChunk = await createChunkEncryptor(ulKey);
     await Promise.all(Array.from({ length: n }, (_, i) => worker(i)));
   } finally {
     await source.close?.();

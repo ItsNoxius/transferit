@@ -46,6 +46,11 @@ A **service worker is not required**. It is only used if you opt into `downloadB
 
 Same `upload()` API — pass a `File`, `Blob`, `FileList` (e.g. `<input webkitdirectory>`), or `{ path, blob }[]` instead of a filesystem path. No service worker.
 
+Upload chunk encryption and integrity checks use native WebCrypto AES in browsers
+and Node, with keys imported once per file. This avoids the throughput limit and
+main-thread blocking of JavaScript AES. Environments without WebCrypto use the
+original implementation; ciphertext and integrity checks are identical.
+
 ```ts
 const tx = new Transferit();
 await tx.upload(fileInput.files![0]!);
